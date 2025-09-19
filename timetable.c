@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <tchar.h>
+#include <math.h>
 #include "timetable_data.h"
 #include "sys_utils.h"
 #include "renderer.h"
@@ -20,7 +21,16 @@
 
 HWND hWnd;
 NOTIFYICONDATA nid;
-int viewMode = 0; // 0=日视图，1=周视图
+int viewMode = 1; // 0=日视图，1=周视图（默认为周视图）
+
+// 缓动动画相关变量
+BOOL isAnimating = FALSE;
+RECT startRect, targetRect;
+DWORD animationStart;
+#define ANIMATION_DURATION 300 // 动画持续时间（毫秒）
+
+// 原始窗口大小（周视图大小）
+int originalWidth, originalHeight;
 
 // 窗口过程
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -36,15 +46,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lstrcpyW(nid.szTip, L"课程表小组件");
         Shell_NotifyIcon(NIM_ADD, &nid);
 
-        SetTimer(hwnd, 1, 60000, NULL); // 每分钟刷新
+        SetTimer(hwnd, 1, 10, NULL); // 每10毫秒刷新一次以支持动画
         // ApplyRoundRegion(hwnd); // 已空实现，可不调用
         // 首次渲染
         RenderLayered(hwnd, viewMode);
         break;
     }
     case WM_TIMER:
-        // 直接重新渲染分层窗口
-        RenderLayered(hwnd, viewMode);
+        if (wParam == 1) { // 主定时器
+            // 处理动画
+            if (isAnimating) {
+                DWORD currentTime = GetTickCount();
+                DWORD elapsed = currentTime - animationStart;
+                
+                if (elapsed >= ANIMATION_DURATION) {
+                    // 动画结束，设置为目标位置和大小
+                    SetWindowPos(hwnd, NULL, targetRect.left, targetRect.top,
+                                targetRect.right - targetRect.left, targetRect.bottom - targetRect.top,
+                                SWP_NOZORDER | SWP_NOACTIVATE);
+                    isAnimating = FALSE;
+                } else {
+                    // 计算动画插值
+                    float progress = (float)elapsed / ANIMATION_DURATION;
+                    // 使用缓动函数（先快后慢）
+                    progress = 1.0f - powf(1.0f - progress, 3.0f);
+                    
+                    int currentX = startRect.left + (int)((targetRect.left - startRect.left) * progress);
+                    int currentY = startRect.top + (int)((targetRect.top - startRect.top) * progress);
+                    int currentWidth = startRect.right - startRect.left + 
+                                      (int)(((targetRect.right - targetRect.left) - (startRect.right - startRect.left)) * progress);
+                    int currentHeight = startRect.bottom - startRect.top + 
+                                       (int)(((targetRect.bottom - targetRect.top) - (startRect.bottom - startRect.top)) * progress);
+                    
+                    SetWindowPos(hwnd, NULL, currentX, currentY, currentWidth, currentHeight,
+                                SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                RenderLayered(hwnd, viewMode);
+            } else {
+                // 每分钟刷新
+                static DWORD lastMinute = 0;
+                DWORD currentMinute = GetTickCount() / 60000;
+                if (currentMinute != lastMinute) {
+                    RenderLayered(hwnd, viewMode);
+                    lastMinute = currentMinute;
+                }
+            }
+        }
         break;
 
     case WM_PAINT: {
@@ -73,6 +120,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int winW = rc.right - rc.left;
         int winH = rc.bottom - rc.top;
         int newX = rc.left, newY = rc.top;
+
+        // 保存原始窗口大小（周视图大小）
+        if (viewMode == 1) { // 周视图
+            originalWidth = winW;
+            originalHeight = winH;
+        }
 
         // 按窗口 DPI 缩放距离和边距
         UINT dpi = GetWindowDpi(hwnd);
@@ -125,8 +178,76 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
         } else if (LOWORD(wParam) == ID_TRAY_SWITCH) {
             viewMode = 1 - viewMode; // 切换模式
-            // 切换模式后直接重绘分层窗口
-            RenderLayered(hwnd, viewMode);
+            
+            // 获取当前窗口位置和大小
+            RECT currentRect;
+            GetWindowRect(hwnd, &currentRect);
+            
+            // 计算目标位置和大小
+            targetRect = currentRect;
+            
+            if (viewMode == 0) { // 切换到日视图 - 宽度缩小到1/3，高度不变
+                int newWidth = originalWidth / 3;
+                
+                // 检查吸附情况以确定缩小方向
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int snapDist = SNAP_DIST;
+                
+                // 默认从右侧缩小
+                targetRect.left = currentRect.right - newWidth;
+                targetRect.right = currentRect.right;
+                targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
+                
+                // 如果靠近左侧屏幕边缘，则从左侧缩小
+                if (abs(currentRect.left - 0) < snapDist) {
+                    targetRect.left = currentRect.left;
+                    targetRect.right = currentRect.left + newWidth;
+                    targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
+                } 
+                // 如果靠近右侧屏幕边缘，则从右侧缩小
+                else if (abs(screenW - currentRect.right) < snapDist) {
+                    targetRect.left = currentRect.right - newWidth;
+                    targetRect.right = currentRect.right;
+                    targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
+                }
+            } else { // 切换到周视图 - 恢复原始大小并向外扩展
+                // 检查吸附情况以确定扩展方向
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int snapDist = SNAP_DIST;
+                
+                // 默认从左侧扩展（保持左侧位置不变）
+                targetRect.right = targetRect.left + originalWidth;
+                targetRect.bottom = targetRect.top + originalHeight;
+                
+                // 如果当前靠近左侧屏幕边缘，则从左侧扩展
+                if (abs(currentRect.left - 0) < snapDist) {
+                    targetRect.right = targetRect.left + originalWidth;
+                    targetRect.bottom = targetRect.top + originalHeight;
+                } 
+                // 如果当前靠近右侧屏幕边缘，则从右侧扩展（保持右侧位置不变）
+                else if (abs(screenW - currentRect.right) < snapDist) {
+                    targetRect.left = targetRect.right - originalWidth;
+                    targetRect.bottom = targetRect.top + originalHeight;
+                }
+                // 如果既不靠近左侧也不靠近右侧，则尝试保持窗口在屏幕内
+                else {
+                    // 如果窗口右侧加上完整宽度会超出屏幕，则从右侧扩展
+                    if (currentRect.right - currentRect.left + originalWidth > screenW) {
+                        targetRect.left = screenW - originalWidth;
+                        targetRect.right = screenW;
+                        targetRect.bottom = targetRect.top + originalHeight;
+                    } else {
+                        // 否则从左侧扩展
+                        targetRect.right = targetRect.left + originalWidth;
+                        targetRect.bottom = targetRect.top + originalHeight;
+                    }
+                }
+            }
+            
+            // 启动动画
+            startRect = currentRect;
+            animationStart = GetTickCount();
+            isAnimating = TRUE;
         }
         break;
 
@@ -167,6 +288,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int winH = MulDiv(300, sysDpi, 96);
     int x = screenW - winW - MulDiv(10, sysDpi, 96);
     int y = MulDiv(10, sysDpi, 96);
+    
+    // 保存原始窗口大小
+    originalWidth = winW;
+    originalHeight = winH;
 
     hWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, cls, L"课程表",
                           WS_POPUP, x, y, winW, winH,

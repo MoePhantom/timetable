@@ -4,7 +4,20 @@
 #include <windows.h>
 #include <shellapi.h>
 
-extern WCHAR* timetable[DAYS][CLASSES];
+extern ClassInfo timetable[DAYS][CLASSES];
+
+// 文本居中绘制函数
+void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
+    if (!text) return;
+    
+    SIZE textSize;
+    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &textSize);
+    
+    int x = rc->left + (rc->right - rc->left - textSize.cx) / 2;
+    int y = rc->top + yOffset;
+    
+    TextOutW(hdc, x, y, text, lstrlenW(text));
+}
 
 // 绘制课程表
 void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
@@ -14,7 +27,7 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
     LOGFONT lf = {0};
     // 根据当前 DC DPI 缩放字体高度
     int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
-    lf.lfHeight = -MulDiv(18, dpi, 96);
+    lf.lfHeight = -MulDiv(12, dpi, 96);
     lstrcpyW(lf.lfFaceName, L"微软雅黑"); // 中文字体
     HFONT hFont = CreateFontIndirect(&lf);
     HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
@@ -30,9 +43,18 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
             MoveToEx(hdc, rc.left, rc.top + i*cellH, NULL);
             LineTo(hdc, rc.right, rc.top + i*cellH);
 
-            if (timetable[today][i]) {
-                TextOutW(hdc, rc.left+10, rc.top+i*cellH+5,
-                         timetable[today][i], lstrlenW(timetable[today][i]));
+            RECT cellRect = {rc.left, rc.top + i*cellH, rc.right, rc.top + (i+1)*cellH};
+            
+            if (timetable[today][i].name) {
+                // 绘制课程名称（居中显示）
+                DrawTextCentered(hdc, &cellRect, timetable[today][i].name, 10);
+                
+                // 绘制位置信息（居中显示）
+                if (timetable[today][i].location) {
+                    SetTextColor(hdc, RGB(200, 200, 200)); // 稍微淡一点的颜色
+                    DrawTextCentered(hdc, &cellRect, timetable[today][i].location, 35);
+                    SetTextColor(hdc, RGB(255,255,255)); // 恢复白色
+                }
             }
         }
     } else {
@@ -53,12 +75,18 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
 
         for (int d=0; d<DAYS; d++) {
             for (int i=0; i<CLASSES; i++) {
-                if (timetable[d][i]) {
-                    TextOutW(hdc,
-                        rc.left + d*cellW + 5,
-                        rc.top + i*cellH + 5,
-                        timetable[d][i],
-                        lstrlenW(timetable[d][i]));
+                RECT cellRect = {rc.left + d*cellW, rc.top + i*cellH, rc.left + (d+1)*cellW, rc.top + (i+1)*cellH};
+                
+                if (timetable[d][i].name) {
+                    // 绘制课程名称（居中显示）
+                    DrawTextCentered(hdc, &cellRect, timetable[d][i].name, 10);
+                    
+                    // 绘制位置信息（居中显示）
+                    if (timetable[d][i].location) {
+                        SetTextColor(hdc, RGB(200, 200, 200)); // 稍微淡一点的颜色
+                        DrawTextCentered(hdc, &cellRect, timetable[d][i].location, 35);
+                        SetTextColor(hdc, RGB(255,255,255)); // 恢复白色
+                    }
                 }
             }
         }
@@ -97,7 +125,7 @@ void RenderLayered(HWND hwnd, int viewMode) {
     }
 
     // 背景颜色和 alpha（基准 alpha）
-    BYTE bgR = 60, bgG = 60, bgB = 60;
+    BYTE bgR = 0, bgG = 0, bgB = 0;  // 改为黑色背景
     BYTE baseAlpha = (BYTE)WINDOW_ALPHA;
 
     // 先把缓冲区设置为不透明的背景预乘色（用 baseAlpha），后续会根据圆角蒙版重新赋值
