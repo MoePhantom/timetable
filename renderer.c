@@ -69,7 +69,6 @@ void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
 
         int drawX = (int)floor(currentX + 0.5);
         TextOutW(hdc, drawX, y, text, len);
-
         if (saved > 0) {
             RestoreDC(hdc, saved);
         }
