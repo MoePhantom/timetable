@@ -41,6 +41,8 @@ typedef enum {
 
 static SnapEdge currentSnapEdge = SNAP_EDGE_RIGHT;
 
+static BOOL scrollTimerActive = FALSE;
+
 static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int snapDist) {
     if (!rc) return SNAP_EDGE_NONE;
     int left = (int)rc->left;
@@ -52,6 +54,18 @@ static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int 
         return SNAP_EDGE_RIGHT;
     }
     return SNAP_EDGE_NONE;
+}
+
+
+static void UpdateScrollTimer(HWND hwnd) {
+    BOOL needScroll = RendererHasOverflowingText();
+    if (needScroll && !scrollTimerActive) {
+        SetTimer(hwnd, 2, 40, NULL);
+        scrollTimerActive = TRUE;
+    } else if (!needScroll && scrollTimerActive) {
+        KillTimer(hwnd, 2);
+        scrollTimerActive = FALSE;
+    }
 }
 
 // 窗口过程
@@ -73,6 +87,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // ApplyRoundRegion(hwnd); // 已空实现，可不调用
         // 首次渲染
         RenderLayered(hwnd, viewMode);
+
+        UpdateScrollTimer(hwnd);
+
 
         RECT initRect;
         if (GetWindowRect(hwnd, &initRect)) {
@@ -119,6 +136,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 RenderLayered(hwnd, viewMode);
+                UpdateScrollTimer(hwnd);
             } else {
                 // 每分钟刷新
                 static DWORD lastMinute = 0;
@@ -126,11 +144,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (currentMinute != lastMinute) {
                     RenderLayered(hwnd, viewMode);
                     lastMinute = currentMinute;
+                    UpdateScrollTimer(hwnd);
                 }
             }
         } else if (wParam == 2) {
             if (!isAnimating) {
                 RenderLayered(hwnd, viewMode);
+                UpdateScrollTimer(hwnd);
+
             }
         }
         break;
@@ -140,6 +161,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         BeginPaint(hwnd, &ps);
         // 使用 UpdateLayeredWindow 绘制内容
         RenderLayered(hwnd, viewMode);
+        UpdateScrollTimer(hwnd);
         EndPaint(hwnd, &ps);
         break;
     }
@@ -147,6 +169,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         //ApplyRoundRegion(hwnd); // 已空实现
         // 重新渲染尺寸变化后的图像
         RenderLayered(hwnd, viewMode);
+        UpdateScrollTimer(hwnd);
         break;
     case WM_LBUTTONDOWN: // 拖动窗口
         ReleaseCapture();
@@ -298,7 +321,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         KillTimer(hwnd, 1);
-        KillTimer(hwnd, 2);
+        if (scrollTimerActive) {
+            KillTimer(hwnd, 2);
+            scrollTimerActive = FALSE;
+        }
+
         Shell_NotifyIcon(NIM_DELETE, &nid);
         PostQuitMessage(0);
         break;
@@ -349,7 +376,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     UpdateWindow(hWnd);
 
     // 首次确保渲染（如果 WM_CREATE 未触发）
-    if (hWnd) RenderLayered(hWnd, viewMode);
+    if (hWnd) {
+        RenderLayered(hWnd, viewMode);
+        UpdateScrollTimer(hWnd);
+    }
 
     MSG msg;
     while (GetMessage(&msg,NULL,0,0)>0) {
