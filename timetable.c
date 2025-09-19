@@ -8,6 +8,7 @@
 #include <shellapi.h>
 #include <tchar.h>
 #include <math.h>
+#include <stdlib.h>
 #include "timetable_data.h"
 #include "sys_utils.h"
 #include "renderer.h"
@@ -32,6 +33,27 @@ DWORD animationStart;
 // 原始窗口大小（周视图大小）
 int originalWidth, originalHeight;
 
+typedef enum {
+    SNAP_EDGE_NONE = 0,
+    SNAP_EDGE_LEFT,
+    SNAP_EDGE_RIGHT
+} SnapEdge;
+
+static SnapEdge currentSnapEdge = SNAP_EDGE_RIGHT;
+
+static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int snapDist) {
+    if (!rc) return SNAP_EDGE_NONE;
+    int left = (int)rc->left;
+    int right = (int)rc->right;
+    if (abs(left - snapMargin) <= snapDist) {
+        return SNAP_EDGE_LEFT;
+    }
+    if (abs((screenW - snapMargin) - right) <= snapDist) {
+        return SNAP_EDGE_RIGHT;
+    }
+    return SNAP_EDGE_NONE;
+}
+
 // 窗口过程
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -47,9 +69,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         Shell_NotifyIcon(NIM_ADD, &nid);
 
         SetTimer(hwnd, 1, 10, NULL); // 每10毫秒刷新一次以支持动画
+        SetTimer(hwnd, 2, 50, NULL); // 文本滚动刷新
         // ApplyRoundRegion(hwnd); // 已空实现，可不调用
         // 首次渲染
         RenderLayered(hwnd, viewMode);
+
+        RECT initRect;
+        if (GetWindowRect(hwnd, &initRect)) {
+            UINT dpi = GetWindowDpi(hwnd);
+            int snapDist = max(1, MulDiv(SNAP_DIST, dpi, 96));
+            int snapMargin = max(1, MulDiv(SNAP_MARGIN, dpi, 96));
+            int screenW = GetSystemMetrics(SM_CXSCREEN);
+            currentSnapEdge = DetectSnapEdge(&initRect, screenW, snapMargin, snapDist);
+        }
         break;
     }
     case WM_TIMER:
@@ -58,13 +90,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (isAnimating) {
                 DWORD currentTime = GetTickCount();
                 DWORD elapsed = currentTime - animationStart;
-                
+
                 if (elapsed >= ANIMATION_DURATION) {
                     // 动画结束，设置为目标位置和大小
                     SetWindowPos(hwnd, NULL, targetRect.left, targetRect.top,
                                 targetRect.right - targetRect.left, targetRect.bottom - targetRect.top,
                                 SWP_NOZORDER | SWP_NOACTIVATE);
                     isAnimating = FALSE;
+                    UINT dpi = GetWindowDpi(hwnd);
+                    int snapDist = max(1, MulDiv(SNAP_DIST, dpi, 96));
+                    int snapMargin = max(1, MulDiv(SNAP_MARGIN, dpi, 96));
+                    int screenW = GetSystemMetrics(SM_CXSCREEN);
+                    currentSnapEdge = DetectSnapEdge(&targetRect, screenW, snapMargin, snapDist);
                 } else {
                     // 计算动画插值
                     float progress = (float)elapsed / ANIMATION_DURATION;
@@ -90,6 +127,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     RenderLayered(hwnd, viewMode);
                     lastMinute = currentMinute;
                 }
+            }
+        } else if (wParam == 2) {
+            if (!isAnimating) {
+                RenderLayered(hwnd, viewMode);
             }
         }
         break;
@@ -150,6 +191,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         SetWindowPos(hwnd, NULL, newX, newY, winW, winH,
                      SWP_NOZORDER|SWP_NOACTIVATE);
+        RECT newRect;
+        GetWindowRect(hwnd, &newRect);
+        currentSnapEdge = DetectSnapEdge(&newRect, screenW, snapMargin, snapDist);
         break;
     }
 
@@ -178,72 +222,73 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
         } else if (LOWORD(wParam) == ID_TRAY_SWITCH) {
             viewMode = 1 - viewMode; // 切换模式
-            
+
             // 获取当前窗口位置和大小
             RECT currentRect;
             GetWindowRect(hwnd, &currentRect);
-            
+
             // 计算目标位置和大小
             targetRect = currentRect;
-            
+
+            UINT dpi = GetWindowDpi(hwnd);
+            int snapDist = max(1, MulDiv(SNAP_DIST, dpi, 96));
+            int snapMargin = max(1, MulDiv(SNAP_MARGIN, dpi, 96));
+            int screenW = GetSystemMetrics(SM_CXSCREEN);
+
+            SnapEdge snapEdge = DetectSnapEdge(&currentRect, screenW, snapMargin, snapDist);
+            if (snapEdge != SNAP_EDGE_NONE) {
+                currentSnapEdge = snapEdge;
+            }
+
             if (viewMode == 0) { // 切换到日视图 - 宽度缩小到1/3，高度不变
-                int newWidth = originalWidth / 3;
-                
-                // 检查吸附情况以确定缩小方向
-                int screenW = GetSystemMetrics(SM_CXSCREEN);
-                int snapDist = SNAP_DIST;
-                
-                // 默认从右侧缩小
-                targetRect.left = currentRect.right - newWidth;
-                targetRect.right = currentRect.right;
-                targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
-                
-                // 如果靠近左侧屏幕边缘，则从左侧缩小
-                if (abs(currentRect.left - 0) < snapDist) {
+                int newWidth = max(1, originalWidth / 3);
+                targetRect.bottom = targetRect.top + originalHeight;
+
+                if (currentSnapEdge == SNAP_EDGE_LEFT) {
                     targetRect.left = currentRect.left;
-                    targetRect.right = currentRect.left + newWidth;
-                    targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
-                } 
-                // 如果靠近右侧屏幕边缘，则从右侧缩小
-                else if (abs(screenW - currentRect.right) < snapDist) {
-                    targetRect.left = currentRect.right - newWidth;
+                    targetRect.right = targetRect.left + newWidth;
+                } else if (currentSnapEdge == SNAP_EDGE_RIGHT) {
                     targetRect.right = currentRect.right;
-                    targetRect.bottom = targetRect.top + originalHeight; // 保持高度不变
+                    targetRect.left = targetRect.right - newWidth;
+                } else {
+                    targetRect.left = currentRect.left;
+                    targetRect.right = targetRect.left + newWidth;
+                    if (targetRect.right > screenW - snapMargin) {
+                        targetRect.right = screenW - snapMargin;
+                        targetRect.left = targetRect.right - newWidth;
+                    }
+                    if (targetRect.left < snapMargin) {
+                        targetRect.left = snapMargin;
+                        targetRect.right = targetRect.left + newWidth;
+                    }
                 }
             } else { // 切换到周视图 - 恢复原始大小并向外扩展
-                // 检查吸附情况以确定扩展方向
-                int screenW = GetSystemMetrics(SM_CXSCREEN);
-                int snapDist = SNAP_DIST;
-                
-                // 默认从左侧扩展（保持左侧位置不变）
-                targetRect.right = targetRect.left + originalWidth;
                 targetRect.bottom = targetRect.top + originalHeight;
-                
-                // 如果当前靠近左侧屏幕边缘，则从左侧扩展
-                if (abs(currentRect.left - 0) < snapDist) {
+                if (currentSnapEdge == SNAP_EDGE_LEFT) {
+                    targetRect.left = currentRect.left;
                     targetRect.right = targetRect.left + originalWidth;
-                    targetRect.bottom = targetRect.top + originalHeight;
-                } 
-                // 如果当前靠近右侧屏幕边缘，则从右侧扩展（保持右侧位置不变）
-                else if (abs(screenW - currentRect.right) < snapDist) {
+                } else if (currentSnapEdge == SNAP_EDGE_RIGHT) {
+                    targetRect.right = currentRect.right;
                     targetRect.left = targetRect.right - originalWidth;
-                    targetRect.bottom = targetRect.top + originalHeight;
-                }
-                // 如果既不靠近左侧也不靠近右侧，则尝试保持窗口在屏幕内
-                else {
-                    // 如果窗口右侧加上完整宽度会超出屏幕，则从右侧扩展
-                    if (currentRect.right - currentRect.left + originalWidth > screenW) {
-                        targetRect.left = screenW - originalWidth;
-                        targetRect.right = screenW;
-                        targetRect.bottom = targetRect.top + originalHeight;
-                    } else {
-                        // 否则从左侧扩展
+                } else {
+                    targetRect.left = currentRect.left;
+                    targetRect.right = targetRect.left + originalWidth;
+                    if (targetRect.right > screenW - snapMargin) {
+                        targetRect.right = screenW - snapMargin;
+                        targetRect.left = targetRect.right - originalWidth;
+                    }
+                    if (targetRect.left < snapMargin) {
+                        targetRect.left = snapMargin;
                         targetRect.right = targetRect.left + originalWidth;
-                        targetRect.bottom = targetRect.top + originalHeight;
                     }
                 }
             }
-            
+
+            SnapEdge newEdge = DetectSnapEdge(&targetRect, screenW, snapMargin, snapDist);
+            if (newEdge != SNAP_EDGE_NONE) {
+                currentSnapEdge = newEdge;
+            }
+
             // 启动动画
             startRect = currentRect;
             animationStart = GetTickCount();
@@ -253,6 +298,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         KillTimer(hwnd, 1);
+        KillTimer(hwnd, 2);
         Shell_NotifyIcon(NIM_DELETE, &nid);
         PostQuitMessage(0);
         break;
