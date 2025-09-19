@@ -3,6 +3,7 @@
 #include "sys_utils.h"
 #include <windows.h>
 #include <shellapi.h>
+#include <math.h>
 
 extern ClassInfo timetable[DAYS][CLASSES];
 
@@ -24,24 +25,50 @@ void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
         int x = rc->left + (cellWidth - textSize.cx) / 2;
         TextOutW(hdc, x, y, text, len);
     } else {
-        int scrollGap = max(cellWidth / 4, 20);
-        int scrollRange = textSize.cx + cellWidth + scrollGap;
-        if (scrollRange <= 0) scrollRange = textSize.cx;
-
-        DWORD tick = GetTickCount();
-        const int speedDiv = 20; // 数值越小滚动越快
-        DWORD step = speedDiv > 0 ? tick / (DWORD)speedDiv : tick;
-        int offset = (int)(step % (DWORD)scrollRange);
-        int startX = rc->left + cellWidth - offset;
-
         int saved = SaveDC(hdc);
         if (saved > 0) {
             IntersectClipRect(hdc, rc->left, y, rc->right, y + textSize.cy);
         }
 
-        TextOutW(hdc, startX, y, text, len);
-        TextOutW(hdc, startX - scrollRange, y, text, len);
+        int alignLeft = rc->left;
+        int alignRight = rc->right - textSize.cx;
+        int travelPixels = alignLeft - alignRight;
+        if (travelPixels < 0) travelPixels = 0;
 
+        const double pixelsPerSecond = 40.0; // 滚动速度
+        const double pauseDurationMs = 1000.0;
+        double pixelsPerMs = pixelsPerSecond / 1000.0;
+        if (pixelsPerMs <= 0.0) pixelsPerMs = 0.04; // 安全兜底
+
+        double travelMs = travelPixels / pixelsPerMs;
+        if (travelMs < 1.0) travelMs = 1.0;
+        double cycleMs = travelMs + pauseDurationMs + travelMs + pauseDurationMs;
+
+        static DWORD scrollBaseTick = 0;
+        DWORD tick = GetTickCount();
+        if (scrollBaseTick == 0) {
+            scrollBaseTick = tick;
+        }
+        DWORD elapsedTicks = tick - scrollBaseTick;
+        double phase = fmod((double)elapsedTicks, cycleMs);
+        double currentX = (double)alignLeft;
+
+        if (phase < travelMs) {
+            currentX = alignLeft - phase * pixelsPerMs;
+        } else if (phase < travelMs + pauseDurationMs) {
+            currentX = (double)alignRight;
+        } else if (phase < travelMs + pauseDurationMs + travelMs) {
+            double t = phase - (travelMs + pauseDurationMs);
+            currentX = alignRight + t * pixelsPerMs;
+        } else {
+            currentX = (double)alignLeft;
+        }
+
+        if (currentX < alignRight) currentX = (double)alignRight;
+        if (currentX > alignLeft) currentX = (double)alignLeft;
+
+        int drawX = (int)floor(currentX + 0.5);
+        TextOutW(hdc, drawX, y, text, len);
         if (saved > 0) {
             RestoreDC(hdc, saved);
         }
