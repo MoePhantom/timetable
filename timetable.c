@@ -1,8 +1,15 @@
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #include <windows.h>
 #include <shellapi.h>
 #include <tchar.h>
+#include "timetable_data.h"
+#include "sys_utils.h"
+#include "renderer.h"
 
 #define ID_TRAY_APP_ICON 1001
 #define ID_TRAY_EXIT     1002
@@ -10,101 +17,10 @@
 #define WM_SYSICON       (WM_USER + 1)
 #define SNAP_DIST        20
 #define SNAP_MARGIN      10
-#define WINDOW_ALPHA     180
-#define CORNER_RADIUS    16
-
-#define DAYS 7
-#define CLASSES 8
 
 HWND hWnd;
 NOTIFYICONDATA nid;
 int viewMode = 0; // 0=日视图，1=周视图
-
-// 课程表数据（UTF-16）
-WCHAR* timetable[DAYS][CLASSES] = {
-    {L"高数", L"英语", L"C语言", L"体育", NULL, NULL, NULL, NULL}, // 周一
-    {L"离散", L"英语", L"线代", NULL, NULL, NULL, NULL, NULL},     // 周二
-    {L"概率", L"物理", L"C实验", NULL, NULL, NULL, NULL, NULL},   // 周三
-    {L"毛概", L"英语", NULL, NULL, NULL, NULL, NULL, NULL},       // 周四
-    {L"操作系统", L"编译原理", NULL, NULL, NULL, NULL, NULL, NULL}, // 周五
-    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},              // 周六
-    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},              // 周日
-};
-
-// 绘制课程表
-void DrawTimetable(HDC hdc, RECT rc) {
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(255,255,255));
-
-    LOGFONT lf = {0};
-    lf.lfHeight = -18;
-    lstrcpyW(lf.lfFaceName, L"微软雅黑"); // 中文字体
-    HFONT hFont = CreateFontIndirect(&lf);
-    HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    int today = (st.wDayOfWeek + 6) % 7; // 周一=0
-
-    if (viewMode == 0) {
-        // ==== 日视图 ====
-        int cellH = (rc.bottom - rc.top) / CLASSES;
-        for (int i=0; i<CLASSES; i++) {
-            MoveToEx(hdc, rc.left, rc.top + i*cellH, NULL);
-            LineTo(hdc, rc.right, rc.top + i*cellH);
-
-            if (timetable[today][i]) {
-                TextOutW(hdc, rc.left+10, rc.top+i*cellH+5,
-                         timetable[today][i], lstrlenW(timetable[today][i]));
-            }
-        }
-    } else {
-        // ==== 周视图 ====
-        int cellH = (rc.bottom - rc.top) / CLASSES;
-        int cellW = (rc.right - rc.left) / DAYS;
-
-        // 横线
-        for (int i=0; i<=CLASSES; i++) {
-            MoveToEx(hdc, rc.left, rc.top+i*cellH, NULL);
-            LineTo(hdc, rc.right, rc.top+i*cellH);
-        }
-        // 竖线
-        for (int d=0; d<=DAYS; d++) {
-            MoveToEx(hdc, rc.left+d*cellW, rc.top, NULL);
-            LineTo(hdc, rc.left+d*cellW, rc.bottom);
-        }
-
-        for (int d=0; d<DAYS; d++) {
-            for (int i=0; i<CLASSES; i++) {
-                if (timetable[d][i]) {
-                    TextOutW(hdc,
-                        rc.left + d*cellW + 5,
-                        rc.top + i*cellH + 5,
-                        timetable[d][i],
-                        lstrlenW(timetable[d][i]));
-                }
-            }
-        }
-    }
-
-    SelectObject(hdc, oldFont);
-    DeleteObject(hFont);
-}
-
-static void ApplyRoundRegion(HWND hwnd) {
-    RECT rc;
-    if (GetClientRect(hwnd, &rc)) {
-        int width = rc.right - rc.left;
-        int height = rc.bottom - rc.top;
-        HRGN hrgn = CreateRoundRectRgn(0, 0, width, height,
-                                       CORNER_RADIUS, CORNER_RADIUS);
-        if (hrgn) {
-            if (!SetWindowRgn(hwnd, hrgn, TRUE)) {
-                DeleteObject(hrgn);
-            }
-        }
-    }
-}
 
 // 窗口过程
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -121,36 +37,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         Shell_NotifyIcon(NIM_ADD, &nid);
 
         SetTimer(hwnd, 1, 60000, NULL); // 每分钟刷新
-        ApplyRoundRegion(hwnd);
+        // ApplyRoundRegion(hwnd); // 已空实现，可不调用
+        // 首次渲染
+        RenderLayered(hwnd, viewMode);
         break;
     }
     case WM_TIMER:
-        InvalidateRect(hwnd, NULL, TRUE);
+        // 直接重新渲染分层窗口
+        RenderLayered(hwnd, viewMode);
         break;
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        HBRUSH hBrush = CreateSolidBrush(RGB(60, 60, 60));
-        if (hBrush) {
-            FillRect(hdc, &rc, hBrush);
-            DeleteObject(hBrush);
-        }
-        DrawTimetable(hdc, rc);
+        BeginPaint(hwnd, &ps);
+        // 使用 UpdateLayeredWindow 绘制内容
+        RenderLayered(hwnd, viewMode);
         EndPaint(hwnd, &ps);
         break;
     }
     case WM_SIZE:
-        ApplyRoundRegion(hwnd);
+        //ApplyRoundRegion(hwnd); // 已空实现
+        // 重新渲染尺寸变化后的图像
+        RenderLayered(hwnd, viewMode);
         break;
     case WM_LBUTTONDOWN: // 拖动窗口
         ReleaseCapture();
         SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
         break;
 
-    case WM_EXITSIZEMOVE: { // 拖动结束吸附
+    case WM_EXITSIZEMOVE: { // 拖动结束吸附（按窗口 DPI 缩放 SNAP 参数）
         RECT rc;
         GetWindowRect(hwnd, &rc);
         int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -158,19 +73,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int winW = rc.right - rc.left;
         int winH = rc.bottom - rc.top;
         int newX = rc.left, newY = rc.top;
-        if (abs(rc.left - 0) < SNAP_DIST) {
-            newX = SNAP_MARGIN;
+
+        // 按窗口 DPI 缩放距离和边距
+        UINT dpi = GetWindowDpi(hwnd);
+        int snapDist = max(1, MulDiv(SNAP_DIST, dpi, 96));
+        int snapMargin = max(1, MulDiv(SNAP_MARGIN, dpi, 96));
+
+        if (abs(rc.left - 0) < snapDist) {
+            newX = snapMargin;
         }
-        if (abs(screenW - rc.right) < SNAP_DIST) {
-            int snapX = screenW - winW - SNAP_MARGIN;
+        if (abs(screenW - rc.right) < snapDist) {
+            int snapX = screenW - winW - snapMargin;
             if (snapX < 0) snapX = 0;
             newX = snapX;
         }
-        if (abs(rc.top - 0) < SNAP_DIST) {
-            newY = SNAP_MARGIN;
+        if (abs(rc.top - 0) < snapDist) {
+            newY = snapMargin;
         }
-        if (abs(screenH - rc.bottom) < SNAP_DIST) {
-            int snapY = screenH - winH - SNAP_MARGIN;
+        if (abs(screenH - rc.bottom) < snapDist) {
+            int snapY = screenH - winH - snapMargin;
             if (snapY < 0) snapY = 0;
             newY = snapY;
         }
@@ -204,7 +125,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
         } else if (LOWORD(wParam) == ID_TRAY_SWITCH) {
             viewMode = 1 - viewMode; // 切换模式
-            InvalidateRect(hwnd, NULL, TRUE);
+            // 切换模式后直接重绘分层窗口
+            RenderLayered(hwnd, viewMode);
         }
         break;
 
@@ -221,8 +143,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 // 程序入口
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                   PWSTR lpCmdLine, int nCmdShow) {
+    // 建议让进程 DPI aware，以便按正确 DPI 创建初始窗口尺寸
+    SetProcessDPIAware();
+
     const WCHAR cls[] = L"TimetableWidget";
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
@@ -233,19 +158,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     RegisterClassW(&wc);
 
     int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int winW = 400, winH = 300;
-    int x = screenW - winW - 10, y = 10;
+
+    // 获取系统 DPI 并按 DPI 缩放初始窗口尺寸与边距
+    HDC dc = GetDC(NULL);
+    int sysDpi = GetDeviceCaps(dc, LOGPIXELSX);
+    ReleaseDC(NULL, dc);
+    int winW = MulDiv(400, sysDpi, 96);
+    int winH = MulDiv(300, sysDpi, 96);
+    int x = screenW - winW - MulDiv(10, sysDpi, 96);
+    int y = MulDiv(10, sysDpi, 96);
 
     hWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, cls, L"课程表",
                           WS_POPUP, x, y, winW, winH,
                           NULL, NULL, hInstance, NULL);
 
-    if (hWnd) {
-        SetLayeredWindowAttributes(hWnd, 0, WINDOW_ALPHA, LWA_ALPHA);
-    }
+    // 不再使用 SetLayeredWindowAttributes；改为使用 UpdateLayeredWindow 在 RenderLayered 中控制像素 alpha
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
+
+    // 首次确保渲染（如果 WM_CREATE 未触发）
+    if (hWnd) RenderLayered(hWnd, viewMode);
 
     MSG msg;
     while (GetMessage(&msg,NULL,0,0)>0) {
