@@ -40,6 +40,7 @@ typedef enum {
 } SnapEdge;
 
 static SnapEdge currentSnapEdge = SNAP_EDGE_RIGHT;
+
 static BOOL scrollTimerActive = FALSE;
 
 static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int snapDist) {
@@ -54,6 +55,7 @@ static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int 
     }
     return SNAP_EDGE_NONE;
 }
+
 
 static void UpdateScrollTimer(HWND hwnd) {
     BOOL needScroll = RendererHasOverflowingText();
@@ -81,10 +83,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         Shell_NotifyIcon(NIM_ADD, &nid);
 
         SetTimer(hwnd, 1, 10, NULL); // 每10毫秒刷新一次以支持动画
+        SetTimer(hwnd, 2, 50, NULL); // 文本滚动刷新
         // ApplyRoundRegion(hwnd); // 已空实现，可不调用
         // 首次渲染
         RenderLayered(hwnd, viewMode);
+
         UpdateScrollTimer(hwnd);
+
 
         RECT initRect;
         if (GetWindowRect(hwnd, &initRect)) {
@@ -146,6 +151,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!isAnimating) {
                 RenderLayered(hwnd, viewMode);
                 UpdateScrollTimer(hwnd);
+
             }
         }
         break;
@@ -319,6 +325,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, 2);
             scrollTimerActive = FALSE;
         }
+
         Shell_NotifyIcon(NIM_DELETE, &nid);
         PostQuitMessage(0);
         break;

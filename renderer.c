@@ -33,6 +33,7 @@ static BOOL DrawTextInternal(HDC hdc, const RECT *rc, const WCHAR *text, int yOf
 
     int cellWidth = rc->right - rc->left;
     if (cellWidth <= 0) return FALSE;
+
     int y = rc->top + yOffset;
 
     if (textSize.cx <= cellWidth) {
