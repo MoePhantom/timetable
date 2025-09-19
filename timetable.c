@@ -9,6 +9,9 @@
 #define ID_TRAY_SWITCH   1003
 #define WM_SYSICON       (WM_USER + 1)
 #define SNAP_DIST        20
+#define SNAP_MARGIN      10
+#define WINDOW_ALPHA     180
+#define CORNER_RADIUS    16
 
 #define DAYS 7
 #define CLASSES 8
@@ -31,7 +34,7 @@ WCHAR* timetable[DAYS][CLASSES] = {
 // 绘制课程表
 void DrawTimetable(HDC hdc, RECT rc) {
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(0,0,0));
+    SetTextColor(hdc, RGB(255,255,255));
 
     LOGFONT lf = {0};
     lf.lfHeight = -18;
@@ -88,6 +91,21 @@ void DrawTimetable(HDC hdc, RECT rc) {
     DeleteObject(hFont);
 }
 
+static void ApplyRoundRegion(HWND hwnd) {
+    RECT rc;
+    if (GetClientRect(hwnd, &rc)) {
+        int width = rc.right - rc.left;
+        int height = rc.bottom - rc.top;
+        HRGN hrgn = CreateRoundRectRgn(0, 0, width, height,
+                                       CORNER_RADIUS, CORNER_RADIUS);
+        if (hrgn) {
+            if (!SetWindowRgn(hwnd, hrgn, TRUE)) {
+                DeleteObject(hrgn);
+            }
+        }
+    }
+}
+
 // 窗口过程
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -103,6 +121,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         Shell_NotifyIcon(NIM_ADD, &nid);
 
         SetTimer(hwnd, 1, 60000, NULL); // 每分钟刷新
+        ApplyRoundRegion(hwnd);
         break;
     }
     case WM_TIMER:
@@ -114,10 +133,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
+        HBRUSH hBrush = CreateSolidBrush(RGB(60, 60, 60));
+        if (hBrush) {
+            FillRect(hdc, &rc, hBrush);
+            DeleteObject(hBrush);
+        }
         DrawTimetable(hdc, rc);
         EndPaint(hwnd, &ps);
         break;
     }
+    case WM_SIZE:
+        ApplyRoundRegion(hwnd);
+        break;
     case WM_LBUTTONDOWN: // 拖动窗口
         ReleaseCapture();
         SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
@@ -131,10 +158,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int winW = rc.right - rc.left;
         int winH = rc.bottom - rc.top;
         int newX = rc.left, newY = rc.top;
-        if (abs(rc.left - 0) < SNAP_DIST) newX = 0;
-        if (abs(screenW - rc.right) < SNAP_DIST) newX = screenW - winW;
-        if (abs(rc.top - 0) < SNAP_DIST) newY = 0;
-        if (abs(screenH - rc.bottom) < SNAP_DIST) newY = screenH - winH;
+        if (abs(rc.left - 0) < SNAP_DIST) {
+            newX = SNAP_MARGIN;
+        }
+        if (abs(screenW - rc.right) < SNAP_DIST) {
+            int snapX = screenW - winW - SNAP_MARGIN;
+            if (snapX < 0) snapX = 0;
+            newX = snapX;
+        }
+        if (abs(rc.top - 0) < SNAP_DIST) {
+            newY = SNAP_MARGIN;
+        }
+        if (abs(screenH - rc.bottom) < SNAP_DIST) {
+            int snapY = screenH - winH - SNAP_MARGIN;
+            if (snapY < 0) snapY = 0;
+            newY = snapY;
+        }
         SetWindowPos(hwnd, NULL, newX, newY, winW, winH,
                      SWP_NOZORDER|SWP_NOACTIVATE);
         break;
@@ -188,7 +227,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
+    wc.hbrBackground = NULL;
     wc.lpszClassName = cls;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW); // 设置默认箭头光标
     RegisterClassW(&wc);
@@ -197,9 +236,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int winW = 400, winH = 300;
     int x = screenW - winW - 10, y = 10;
 
-    hWnd = CreateWindowExW(WS_EX_TOOLWINDOW, cls, L"课程表",
+    hWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, cls, L"课程表",
                           WS_POPUP, x, y, winW, winH,
                           NULL, NULL, hInstance, NULL);
+
+    if (hWnd) {
+        SetLayeredWindowAttributes(hWnd, 0, WINDOW_ALPHA, LWA_ALPHA);
+    }
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
