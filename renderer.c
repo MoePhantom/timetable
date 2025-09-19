@@ -3,20 +3,77 @@
 #include "sys_utils.h"
 #include <windows.h>
 #include <shellapi.h>
+#include <math.h>
 
 extern ClassInfo timetable[DAYS][CLASSES];
 
 // 文本居中绘制函数
 void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
-    if (!text) return;
-    
+    if (!text || !rc) return;
+
+    int len = lstrlenW(text);
+    if (len <= 0) return;
+
     SIZE textSize;
-    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &textSize);
-    
-    int x = rc->left + (rc->right - rc->left - textSize.cx) / 2;
+    if (!GetTextExtentPoint32W(hdc, text, len, &textSize)) return;
+
+    int cellWidth = rc->right - rc->left;
+    if (cellWidth <= 0) return;
     int y = rc->top + yOffset;
-    
-    TextOutW(hdc, x, y, text, lstrlenW(text));
+
+    if (textSize.cx <= cellWidth) {
+        int x = rc->left + (cellWidth - textSize.cx) / 2;
+        TextOutW(hdc, x, y, text, len);
+    } else {
+        int saved = SaveDC(hdc);
+        if (saved > 0) {
+            IntersectClipRect(hdc, rc->left, y, rc->right, y + textSize.cy);
+        }
+
+        int alignLeft = rc->left;
+        int alignRight = rc->right - textSize.cx;
+        int travelPixels = alignLeft - alignRight;
+        if (travelPixels < 0) travelPixels = 0;
+
+        const double pixelsPerSecond = 40.0; // 滚动速度
+        const double pauseDurationMs = 1000.0;
+        double pixelsPerMs = pixelsPerSecond / 1000.0;
+        if (pixelsPerMs <= 0.0) pixelsPerMs = 0.04; // 安全兜底
+
+        double travelMs = travelPixels / pixelsPerMs;
+        if (travelMs < 1.0) travelMs = 1.0;
+        double cycleMs = travelMs + pauseDurationMs + travelMs + pauseDurationMs;
+
+        static DWORD scrollBaseTick = 0;
+        DWORD tick = GetTickCount();
+        if (scrollBaseTick == 0) {
+            scrollBaseTick = tick;
+        }
+        DWORD elapsedTicks = tick - scrollBaseTick;
+        double phase = fmod((double)elapsedTicks, cycleMs);
+        double currentX = (double)alignLeft;
+
+        if (phase < travelMs) {
+            currentX = alignLeft - phase * pixelsPerMs;
+        } else if (phase < travelMs + pauseDurationMs) {
+            currentX = (double)alignRight;
+        } else if (phase < travelMs + pauseDurationMs + travelMs) {
+            double t = phase - (travelMs + pauseDurationMs);
+            currentX = alignRight + t * pixelsPerMs;
+        } else {
+            currentX = (double)alignLeft;
+        }
+
+        if (currentX < alignRight) currentX = (double)alignRight;
+        if (currentX > alignLeft) currentX = (double)alignLeft;
+
+        int drawX = (int)floor(currentX + 0.5);
+        TextOutW(hdc, drawX, y, text, len);
+
+        if (saved > 0) {
+            RestoreDC(hdc, saved);
+        }
+    }
 }
 
 // 绘制课程表
