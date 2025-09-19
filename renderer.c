@@ -8,15 +8,44 @@ extern ClassInfo timetable[DAYS][CLASSES];
 
 // 文本居中绘制函数
 void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
-    if (!text) return;
-    
+    if (!text || !rc) return;
+
+    int len = lstrlenW(text);
+    if (len <= 0) return;
+
     SIZE textSize;
-    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &textSize);
-    
-    int x = rc->left + (rc->right - rc->left - textSize.cx) / 2;
+    if (!GetTextExtentPoint32W(hdc, text, len, &textSize)) return;
+
+    int cellWidth = rc->right - rc->left;
+    if (cellWidth <= 0) return;
     int y = rc->top + yOffset;
-    
-    TextOutW(hdc, x, y, text, lstrlenW(text));
+
+    if (textSize.cx <= cellWidth) {
+        int x = rc->left + (cellWidth - textSize.cx) / 2;
+        TextOutW(hdc, x, y, text, len);
+    } else {
+        int scrollGap = max(cellWidth / 4, 20);
+        int scrollRange = textSize.cx + cellWidth + scrollGap;
+        if (scrollRange <= 0) scrollRange = textSize.cx;
+
+        DWORD tick = GetTickCount();
+        const int speedDiv = 20; // 数值越小滚动越快
+        DWORD step = speedDiv > 0 ? tick / (DWORD)speedDiv : tick;
+        int offset = (int)(step % (DWORD)scrollRange);
+        int startX = rc->left + cellWidth - offset;
+
+        int saved = SaveDC(hdc);
+        if (saved > 0) {
+            IntersectClipRect(hdc, rc->left, y, rc->right, y + textSize.cy);
+        }
+
+        TextOutW(hdc, startX, y, text, len);
+        TextOutW(hdc, startX - scrollRange, y, text, len);
+
+        if (saved > 0) {
+            RestoreDC(hdc, saved);
+        }
+    }
 }
 
 // 绘制课程表
