@@ -3,7 +3,7 @@
 
 #include <windows.h>
 
-#define WINDOW_ALPHA     220
+#define WINDOW_ALPHA     180
 #define CORNER_RADIUS    16
 
 // 绘制课程表

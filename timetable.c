@@ -9,6 +9,7 @@
 #include <tchar.h>
 #include <math.h>
 #include <stdlib.h>
+#include <mmsystem.h>
 #include "timetable_data.h"
 #include "sys_utils.h"
 #include "renderer.h"
@@ -16,6 +17,7 @@
 #define ID_TRAY_APP_ICON 1001
 #define ID_TRAY_EXIT     1002
 #define ID_TRAY_SWITCH   1003
+#define ID_TRAY_BOTTOM   1004
 #define WM_SYSICON       (WM_USER + 1)
 #define SNAP_DIST        20
 #define SNAP_MARGIN      10
@@ -27,8 +29,17 @@ int viewMode = 1; // 0=日视图，1=周视图（默认为周视图）
 // 缓动动画相关变量
 BOOL isAnimating = FALSE;
 RECT startRect, targetRect;
-DWORD animationStart;
-#define ANIMATION_DURATION 300 // 动画持续时间（毫秒）
+static const double ANIMATION_DURATION_MS = 300.0; // 动画持续时间
+static const double FRAME_INTERVAL_MS = 1000.0 / 60.0;
+
+static BOOL precisionTimerActive = FALSE;
+static double animationStartMs = 0.0;
+static double lastAnimationFrameMs = 0.0;
+static double lastScrollFrameMs = 0.0;
+static ULONGLONG lastMinuteSlot = 0;
+
+static LARGE_INTEGER perfFreq = {0};
+static LARGE_INTEGER perfBase = {0};
 
 // 原始窗口大小（周视图大小）
 int originalWidth, originalHeight;
@@ -42,6 +53,30 @@ typedef enum {
 static SnapEdge currentSnapEdge = SNAP_EDGE_RIGHT;
 
 static BOOL scrollTimerActive = FALSE;
+
+static BOOL keepOnBottom = TRUE;
+
+static void EnsureBottomOrder(HWND hwnd) {
+    if (!keepOnBottom) {
+        return;
+    }
+    SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOSENDCHANGING);
+}
+
+
+static double GetClockMs(void) {
+    if (perfFreq.QuadPart == 0) {
+        if (!QueryPerformanceFrequency(&perfFreq)) {
+            return (double)GetTickCount64();
+        }
+        QueryPerformanceCounter(&perfBase);
+    }
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - perfBase.QuadPart) * 1000.0 / (double)perfFreq.QuadPart;
+}
 
 static SnapEdge DetectSnapEdge(const RECT *rc, int screenW, int snapMargin, int snapDist) {
     if (!rc) return SNAP_EDGE_NONE;
@@ -62,6 +97,7 @@ static void UpdateScrollTimer(HWND hwnd) {
     if (needScroll && !scrollTimerActive) {
         SetTimer(hwnd, 2, 40, NULL);
         scrollTimerActive = TRUE;
+        lastScrollFrameMs = GetClockMs();
     } else if (!needScroll && scrollTimerActive) {
         KillTimer(hwnd, 2);
         scrollTimerActive = FALSE;
@@ -82,13 +118,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         lstrcpyW(nid.szTip, L"课程表小组件");
         Shell_NotifyIcon(NIM_ADD, &nid);
 
-        SetTimer(hwnd, 1, 10, NULL); // 每10毫秒刷新一次以支持动画
-        SetTimer(hwnd, 2, 50, NULL); // 文本滚动刷新
+        if (!precisionTimerActive) {
+            if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+                precisionTimerActive = TRUE;
+            }
+        }
+
+        SetTimer(hwnd, 1, 16, NULL); // 约 60 FPS 的主动画定时器
         // ApplyRoundRegion(hwnd); // 已空实现，可不调用
         // 首次渲染
         RenderLayered(hwnd, viewMode);
 
         UpdateScrollTimer(hwnd);
+
+        lastMinuteSlot = GetTickCount64() / 60000ULL;
+        lastAnimationFrameMs = GetClockMs();
+        lastScrollFrameMs = lastAnimationFrameMs;
 
 
         RECT initRect;
@@ -99,59 +144,72 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int screenW = GetSystemMetrics(SM_CXSCREEN);
             currentSnapEdge = DetectSnapEdge(&initRect, screenW, snapMargin, snapDist);
         }
+
+        EnsureBottomOrder(hwnd);
         break;
     }
     case WM_TIMER:
         if (wParam == 1) { // 主定时器
-            // 处理动画
-            if (isAnimating) {
-                DWORD currentTime = GetTickCount();
-                DWORD elapsed = currentTime - animationStart;
+            double nowMs = GetClockMs();
+            BOOL shouldRender = FALSE;
 
-                if (elapsed >= ANIMATION_DURATION) {
-                    // 动画结束，设置为目标位置和大小
+            if (isAnimating) {
+                double elapsed = nowMs - animationStartMs;
+                if (elapsed >= ANIMATION_DURATION_MS) {
                     SetWindowPos(hwnd, NULL, targetRect.left, targetRect.top,
-                                targetRect.right - targetRect.left, targetRect.bottom - targetRect.top,
-                                SWP_NOZORDER | SWP_NOACTIVATE);
+                                 targetRect.right - targetRect.left,
+                                 targetRect.bottom - targetRect.top,
+                                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+            EnsureBottomOrder(hwnd);
                     isAnimating = FALSE;
                     UINT dpi = GetWindowDpi(hwnd);
                     int snapDist = max(1, MulDiv(SNAP_DIST, dpi, 96));
                     int snapMargin = max(1, MulDiv(SNAP_MARGIN, dpi, 96));
                     int screenW = GetSystemMetrics(SM_CXSCREEN);
                     currentSnapEdge = DetectSnapEdge(&targetRect, screenW, snapMargin, snapDist);
-                } else {
-                    // 计算动画插值
-                    float progress = (float)elapsed / ANIMATION_DURATION;
-                    // 使用缓动函数（先快后慢）
-                    progress = 1.0f - powf(1.0f - progress, 3.0f);
-                    
+                    lastAnimationFrameMs = nowMs;
+                    shouldRender = TRUE;
+                } else if (nowMs - lastAnimationFrameMs >= FRAME_INTERVAL_MS) {
+                    double progress = elapsed / ANIMATION_DURATION_MS;
+                    progress = 1.0 - pow(1.0 - progress, 3.0);
+
+                    int startWidth = startRect.right - startRect.left;
+                    int startHeight = startRect.bottom - startRect.top;
+                    int targetWidth = targetRect.right - targetRect.left;
+                    int targetHeight = targetRect.bottom - targetRect.top;
+
                     int currentX = startRect.left + (int)((targetRect.left - startRect.left) * progress);
                     int currentY = startRect.top + (int)((targetRect.top - startRect.top) * progress);
-                    int currentWidth = startRect.right - startRect.left + 
-                                      (int)(((targetRect.right - targetRect.left) - (startRect.right - startRect.left)) * progress);
-                    int currentHeight = startRect.bottom - startRect.top + 
-                                       (int)(((targetRect.bottom - targetRect.top) - (startRect.bottom - startRect.top)) * progress);
-                    
+                    int currentWidth = startWidth + (int)((targetWidth - startWidth) * progress);
+                    int currentHeight = startHeight + (int)((targetHeight - startHeight) * progress);
+
                     SetWindowPos(hwnd, NULL, currentX, currentY, currentWidth, currentHeight,
-                                SWP_NOZORDER | SWP_NOACTIVATE);
+                                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+            EnsureBottomOrder(hwnd);
+                    lastAnimationFrameMs = nowMs;
+                    shouldRender = TRUE;
                 }
+            } else {
+                ULONGLONG currentSlot = GetTickCount64() / 60000ULL;
+                if (currentSlot != lastMinuteSlot) {
+                    lastMinuteSlot = currentSlot;
+                    shouldRender = TRUE;
+                }
+            }
+
+            if (shouldRender) {
                 RenderLayered(hwnd, viewMode);
                 UpdateScrollTimer(hwnd);
-            } else {
-                // 每分钟刷新
-                static DWORD lastMinute = 0;
-                DWORD currentMinute = GetTickCount() / 60000;
-                if (currentMinute != lastMinute) {
-                    RenderLayered(hwnd, viewMode);
-                    lastMinute = currentMinute;
-                    UpdateScrollTimer(hwnd);
-                }
+                lastScrollFrameMs = nowMs;
             }
         } else if (wParam == 2) {
             if (!isAnimating) {
-                RenderLayered(hwnd, viewMode);
-                UpdateScrollTimer(hwnd);
-
+                double nowMs = GetClockMs();
+                if (nowMs - lastScrollFrameMs >= FRAME_INTERVAL_MS) {
+                    lastScrollFrameMs = nowMs;
+                    RenderLayered(hwnd, viewMode);
+                    UpdateScrollTimer(hwnd);
+                }
             }
         }
         break;
@@ -214,6 +272,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         SetWindowPos(hwnd, NULL, newX, newY, winW, winH,
                      SWP_NOZORDER|SWP_NOACTIVATE);
+        EnsureBottomOrder(hwnd);
         RECT newRect;
         GetWindowRect(hwnd, &newRect);
         currentSnapEdge = DetectSnapEdge(&newRect, screenW, snapMargin, snapDist);
@@ -224,11 +283,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SetCursor(LoadCursor(NULL, IDC_ARROW));
         return TRUE;
 
+    case WM_WINDOWPOSCHANGING: {
+        if (keepOnBottom) {
+            WINDOWPOS *pos = (WINDOWPOS*)lParam;
+            if (pos && !(pos->flags & SWP_NOZORDER)) {
+                pos->hwndInsertAfter = HWND_BOTTOM;
+            }
+        }
+        break;
+    }
+
     case WM_SYSICON: {
         if (lParam == WM_RBUTTONUP) {
             HMENU hMenu = CreatePopupMenu();
             AppendMenu(hMenu, MF_STRING, ID_TRAY_SWITCH,
                        viewMode==0 ? L"切换到周视图" : L"切换到日视图");
+            AppendMenu(hMenu, MF_STRING | (keepOnBottom ? MF_CHECKED : MF_UNCHECKED),
+                       ID_TRAY_BOTTOM, L"窗口总在底层");
             AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;
             GetCursorPos(&pt);
@@ -243,6 +314,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (LOWORD(wParam) == ID_TRAY_EXIT) {
             Shell_NotifyIcon(NIM_DELETE, &nid);
             PostQuitMessage(0);
+        } else if (LOWORD(wParam) == ID_TRAY_BOTTOM) {
+            keepOnBottom = !keepOnBottom;
+            if (keepOnBottom) {
+                EnsureBottomOrder(hwnd);
+            }
         } else if (LOWORD(wParam) == ID_TRAY_SWITCH) {
             viewMode = 1 - viewMode; // 切换模式
 
@@ -314,7 +390,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             // 启动动画
             startRect = currentRect;
-            animationStart = GetTickCount();
+            animationStartMs = GetClockMs();
+            lastAnimationFrameMs = animationStartMs;
+            lastScrollFrameMs = animationStartMs;
             isAnimating = TRUE;
         }
         break;
@@ -324,6 +402,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (scrollTimerActive) {
             KillTimer(hwnd, 2);
             scrollTimerActive = FALSE;
+        }
+
+        if (precisionTimerActive) {
+            timeEndPeriod(1);
+            precisionTimerActive = FALSE;
         }
 
         Shell_NotifyIcon(NIM_DELETE, &nid);

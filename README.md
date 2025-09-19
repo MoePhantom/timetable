@@ -18,7 +18,8 @@
 ├── sys_utils.c/.h     # 与系统 DPI 相关的辅助方法
 ├── timetable.c        # 程序入口和窗口消息循环
 ├── timetable_data.c/.h# 示例课程表数据
-└── complie.bat        # Windows 下的编译脚本（MinGW / gcc）
+├── compile.bat        # Windows 下的编译脚本（MinGW / gcc）
+└── README.md          # 项目说明文档
 ```
 
 ## 构建与运行
@@ -29,13 +30,13 @@
 2. 在项目根目录执行批处理脚本：
 
    ```bat
-   complie.bat
+   compile.bat
    ```
 
    脚本等价于执行：
 
    ```bat
-   gcc -municode timetable.c timetable_data.c sys_utils.c renderer.c -o timetable.exe -lgdi32 -lshell32 -luser32
+   gcc -municode timetable.c timetable_data.c sys_utils.c renderer.c -o timetable.exe -lgdi32 -lshell32 -luser32 -lwinmm
    ```
 
 3. 双击运行 `timetable.exe`。窗口默认出现在屏幕右上角，拖动即可移动，靠近屏幕边缘会自动吸附。
