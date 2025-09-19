@@ -15,4 +15,7 @@ void RenderLayered(HWND hwnd, int viewMode);
 // 文本居中绘制函数
 void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset);
 
+// 当前渲染是否存在需要滚动显示的文本
+BOOL RendererHasOverflowingText(void);
+
 #endif // RENDERER_H

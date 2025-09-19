@@ -3,24 +3,109 @@
 #include "sys_utils.h"
 #include <windows.h>
 #include <shellapi.h>
+#include <math.h>
 
 extern ClassInfo timetable[DAYS][CLASSES];
 
+static BOOL g_currentFrameHasOverflow = FALSE;
+static BOOL g_lastFrameHasOverflow = FALSE;
+
+static void UpdateOverflowFlag(BOOL overflowed) {
+    if (overflowed) {
+        g_currentFrameHasOverflow = TRUE;
+    }
+}
+
+static double ClampDouble(double value, double minValue, double maxValue) {
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return value;
+}
+
+static BOOL DrawTextInternal(HDC hdc, const RECT *rc, const WCHAR *text, int yOffset) {
+    if (!hdc || !rc || !text) return FALSE;
+
+    int len = lstrlenW(text);
+    if (len <= 0) return FALSE;
+
+    SIZE textSize;
+    if (!GetTextExtentPoint32W(hdc, text, len, &textSize)) return FALSE;
+
+    int cellWidth = rc->right - rc->left;
+    if (cellWidth <= 0) return FALSE;
+    int y = rc->top + yOffset;
+
+    if (textSize.cx <= cellWidth) {
+        int x = rc->left + (cellWidth - textSize.cx) / 2;
+        TextOutW(hdc, x, y, text, len);
+        return FALSE;
+    }
+
+    int saved = SaveDC(hdc);
+    if (saved > 0) {
+        IntersectClipRect(hdc, rc->left, y, rc->right, y + textSize.cy);
+    }
+
+    const double pixelsPerSecond = 40.0;
+    const double pauseDurationMs = 1000.0;
+    const double pixelsPerMs = (pixelsPerSecond > 0.0) ? (pixelsPerSecond / 1000.0) : 0.04;
+
+    double alignLeft = (double)rc->left;
+    double alignRight = (double)(rc->right - textSize.cx);
+    double travelPixels = alignLeft - alignRight;
+    if (travelPixels < 0.0) travelPixels = 0.0;
+
+    double travelMs = travelPixels / pixelsPerMs;
+    if (travelMs < 1.0) travelMs = 1.0;
+
+    double cycleMs = 2.0 * (travelMs + pauseDurationMs);
+
+    static ULONGLONG scrollEpoch = 0;
+    ULONGLONG tick = GetTickCount64();
+    if (scrollEpoch == 0) {
+        scrollEpoch = tick;
+    }
+
+    double elapsedMs = (double)(tick - scrollEpoch);
+    double phase = fmod(elapsedMs, cycleMs);
+    double currentX;
+
+    if (phase < travelMs) {
+        currentX = alignLeft - phase * pixelsPerMs;
+    } else if (phase < travelMs + pauseDurationMs) {
+        currentX = alignRight;
+    } else if (phase < travelMs + pauseDurationMs + travelMs) {
+        double t = phase - (travelMs + pauseDurationMs);
+        currentX = alignRight + t * pixelsPerMs;
+    } else {
+        currentX = alignLeft;
+    }
+
+    currentX = ClampDouble(currentX, alignRight, alignLeft);
+
+    int drawX = (int)floor(currentX + 0.5);
+    TextOutW(hdc, drawX, y, text, len);
+
+    if (saved > 0) {
+        RestoreDC(hdc, saved);
+    }
+
+    return TRUE;
+}
+
 // 文本居中绘制函数
 void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset) {
-    if (!text) return;
-    
-    SIZE textSize;
-    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &textSize);
-    
-    int x = rc->left + (rc->right - rc->left - textSize.cx) / 2;
-    int y = rc->top + yOffset;
-    
-    TextOutW(hdc, x, y, text, lstrlenW(text));
+    BOOL overflowed = DrawTextInternal(hdc, rc, text, yOffset);
+    UpdateOverflowFlag(overflowed);
+}
+
+BOOL RendererHasOverflowingText(void) {
+    return g_lastFrameHasOverflow;
 }
 
 // 绘制课程表
 void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
+    g_currentFrameHasOverflow = FALSE;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(255,255,255));
 
@@ -94,6 +179,8 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
 
     SelectObject(hdc, oldFont);
     DeleteObject(hFont);
+
+    g_lastFrameHasOverflow = g_currentFrameHasOverflow;
 }
 
 // 渲染分层窗口
