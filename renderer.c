@@ -20,6 +20,11 @@ static size_t g_blurScratchSize = 0;
 static BYTE *g_backgroundSnapshot = NULL;
 static size_t g_backgroundSnapshotSize = 0;
 
+typedef HRESULT (WINAPI *PFNDwmFlush)(VOID);
+static PFNDwmFlush g_pfnDwmFlush = NULL;
+static BOOL g_dwmTriedLoad = FALSE;
+
+
 static void UpdateOverflowFlag(BOOL overflowed) {
     if (overflowed) {
         g_currentFrameHasOverflow = TRUE;
@@ -54,6 +59,57 @@ static int ClampInt(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
     if (value > maxValue) return maxValue;
     return value;
+}
+
+static void WaitForCompositorFrame(void) {
+    if (!g_dwmTriedLoad) {
+        HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+        if (hDwm) {
+            g_pfnDwmFlush = (PFNDwmFlush)GetProcAddress(hDwm, "DwmFlush");
+        }
+        g_dwmTriedLoad = TRUE;
+    }
+    if (g_pfnDwmFlush) {
+        g_pfnDwmFlush();
+    } else {
+        Sleep(1);
+    }
+}
+
+static BOOL CaptureWindowBackdrop(HWND hwnd, HDC targetDC, HDC screenDC, int width, int height, const RECT *wndRect, BYTE *pixelData, size_t bufferSize) {
+    if (!hwnd || !targetDC || !screenDC || !wndRect || !pixelData) {
+        return FALSE;
+    }
+
+    BOOL madeTransparent = FALSE;
+    BOOL forcedHide = FALSE;
+
+    if (SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)) {
+        madeTransparent = TRUE;
+        WaitForCompositorFrame();
+    } else if (IsWindowVisible(hwnd)) {
+        ShowWindow(hwnd, SW_HIDE);
+        forcedHide = TRUE;
+        WaitForCompositorFrame();
+    }
+
+    BOOL copied = BitBlt(targetDC, 0, 0, width, height, screenDC, wndRect->left, wndRect->top, SRCCOPY);
+
+    if (madeTransparent) {
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    } else if (forcedHide) {
+        ShowWindow(hwnd, SW_SHOWNA);
+    }
+
+    if (!copied) {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < bufferSize; i += 4) {
+        pixelData[i + 3] = 255;
+    }
+
+    return TRUE;
 }
 
 static void BoxBlurHorizontal(const BYTE *src, BYTE *dst, int width, int height, int stride, int radius) {
@@ -391,11 +447,8 @@ void RenderLayered(HWND hwnd, int viewMode) {
     GetWindowRect(hwnd, &wndRect);
 
     if (blurActive) {
-        BitBlt(memDC, 0, 0, width, height, hdcScreen, wndRect.left, wndRect.top, SRCCOPY);
-        for (size_t i = 0; i < bufferSize; i += 4) {
-            pixelData[i + 3] = 255;
-        }
-        if (!ApplyBoxBlur(pixelData, width, height, stride, BLUR_RADIUS_PIXELS)) {
+        if (!CaptureWindowBackdrop(hwnd, memDC, hdcScreen, width, height, &wndRect, pixelData, bufferSize) ||
+            !ApplyBoxBlur(pixelData, width, height, stride, BLUR_RADIUS_PIXELS)) {
             blurActive = FALSE;
             baseAlpha = (BYTE)WINDOW_ALPHA;
         }
