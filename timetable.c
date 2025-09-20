@@ -18,6 +18,7 @@
 #define ID_TRAY_EXIT     1002
 #define ID_TRAY_SWITCH   1003
 #define ID_TRAY_BOTTOM   1004
+#define ID_TRAY_BLUR     1005
 #define WM_SYSICON       (WM_USER + 1)
 #define SNAP_DIST        20
 #define SNAP_MARGIN      10
@@ -300,6 +301,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                        viewMode==0 ? L"切换到周视图" : L"切换到日视图");
             AppendMenu(hMenu, MF_STRING | (keepOnBottom ? MF_CHECKED : MF_UNCHECKED),
                        ID_TRAY_BOTTOM, L"窗口总在底层");
+            AppendMenu(hMenu, MF_STRING | (RendererIsBlurEnabled() ? MF_CHECKED : MF_UNCHECKED),
+                       ID_TRAY_BLUR, L"背景模糊");
             AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;
             GetCursorPos(&pt);
@@ -319,6 +322,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (keepOnBottom) {
                 EnsureBottomOrder(hwnd);
             }
+        } else if (LOWORD(wParam) == ID_TRAY_BLUR) {
+            BOOL newState = !RendererIsBlurEnabled();
+            RendererSetBlurEnabled(newState);
+            RenderLayered(hwnd, viewMode);
         } else if (LOWORD(wParam) == ID_TRAY_SWITCH) {
             viewMode = 1 - viewMode; // 切换模式
 
