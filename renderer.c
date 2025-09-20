@@ -10,6 +10,62 @@ extern ClassInfo timetable[DAYS][CLASSES];
 static BOOL g_currentFrameHasOverflow = FALSE;
 static BOOL g_lastFrameHasOverflow = FALSE;
 
+typedef struct {
+    HBITMAP bitmap;
+    void *bits;
+    int width;
+    int height;
+} LayerSurface;
+
+static LayerSurface g_layerSurface = {0};
+static HDC g_layerDC = NULL;
+
+static BOOL EnsureLayerSurface(int width, int height) {
+    if (width <= 0 || height <= 0) return FALSE;
+
+    if (!g_layerDC) {
+        g_layerDC = CreateCompatibleDC(NULL);
+        if (!g_layerDC) {
+            return FALSE;
+        }
+    }
+
+    if (g_layerSurface.bitmap &&
+        (g_layerSurface.width != width || g_layerSurface.height != height)) {
+        DeleteObject(g_layerSurface.bitmap);
+        g_layerSurface.bitmap = NULL;
+        g_layerSurface.bits = NULL;
+        g_layerSurface.width = 0;
+        g_layerSurface.height = 0;
+    }
+
+    if (!g_layerSurface.bitmap) {
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void *bits = NULL;
+        HBITMAP bitmap = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+        if (!bitmap || !bits) {
+            if (bitmap) {
+                DeleteObject(bitmap);
+            }
+            return FALSE;
+        }
+
+        g_layerSurface.bitmap = bitmap;
+        g_layerSurface.bits = bits;
+        g_layerSurface.width = width;
+        g_layerSurface.height = height;
+    }
+
+    return TRUE;
+}
+
 static void UpdateOverflowFlag(BOOL overflowed) {
     if (overflowed) {
         g_currentFrameHasOverflow = TRUE;
@@ -20,6 +76,52 @@ static double ClampDouble(double value, double minValue, double maxValue) {
     if (value < minValue) return minValue;
     if (value > maxValue) return maxValue;
     return value;
+}
+
+static BOOL DayHasAnyClass(int dayIndex) {
+    if (dayIndex < 0 || dayIndex >= DAYS) {
+        return FALSE;
+    }
+
+    for (int i = 0; i < CLASSES; ++i) {
+        if (timetable[dayIndex][i].name) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void DrawHolidayText(HDC hdc, const RECT *rc) {
+    if (!hdc || !rc) return;
+
+    const WCHAR text[] = L"放假";
+    const int len = 2;
+    const int spacing = 6;
+
+    SIZE charSize = {0};
+    if (!GetTextExtentPoint32W(hdc, text, 1, &charSize)) {
+        return;
+    }
+
+    int cellWidth = rc->right - rc->left;
+    int cellHeight = rc->bottom - rc->top;
+    if (cellWidth <= 0 || cellHeight <= 0) return;
+
+    int totalHeight = len * charSize.cy + (len - 1) * spacing;
+    int startY = rc->top + (cellHeight - totalHeight) / 2;
+    int x = rc->left + (cellWidth - charSize.cx) / 2;
+
+    COLORREF originalColor = GetTextColor(hdc);
+    SetTextColor(hdc, RGB(255, 215, 0));
+
+    for (int i = 0; i < len; ++i) {
+        WCHAR ch[2] = {text[i], 0};
+        int y = startY + i * (charSize.cy + spacing);
+        TextOutW(hdc, x, y, ch, 1);
+    }
+
+    SetTextColor(hdc, originalColor);
+    UpdateOverflowFlag(FALSE);
 }
 
 static BOOL DrawTextInternal(HDC hdc, const RECT *rc, const WCHAR *text, int yOffset) {
@@ -125,21 +227,24 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
     if (viewMode == 0) {
         // ==== 日视图 ====
         int cellH = (rc.bottom - rc.top) / CLASSES;
-        for (int i=0; i<CLASSES; i++) {
-            MoveToEx(hdc, rc.left, rc.top + i*cellH, NULL);
-            LineTo(hdc, rc.right, rc.top + i*cellH);
+        BOOL hasAnyClass = DayHasAnyClass(today);
 
-            RECT cellRect = {rc.left, rc.top + i*cellH, rc.right, rc.top + (i+1)*cellH};
-            
-            if (timetable[today][i].name) {
-                // 绘制课程名称（居中显示）
-                DrawTextCentered(hdc, &cellRect, timetable[today][i].name, 10);
-                
-                // 绘制位置信息（居中显示）
-                if (timetable[today][i].location) {
-                    SetTextColor(hdc, RGB(200, 200, 200)); // 稍微淡一点的颜色
-                    DrawTextCentered(hdc, &cellRect, timetable[today][i].location, 35);
-                    SetTextColor(hdc, RGB(255,255,255)); // 恢复白色
+        if (!hasAnyClass) {
+            DrawHolidayText(hdc, &rc);
+        } else {
+            for (int i=0; i<CLASSES; i++) {
+                RECT cellRect = {rc.left, rc.top + i*cellH, rc.right, rc.top + (i+1)*cellH};
+
+                if (timetable[today][i].name) {
+                    // 绘制课程名称（居中显示）
+                    DrawTextCentered(hdc, &cellRect, timetable[today][i].name, 10);
+
+                    // 绘制位置信息（居中显示）
+                    if (timetable[today][i].location) {
+                        SetTextColor(hdc, RGB(200, 200, 200)); // 稍微淡一点的颜色
+                        DrawTextCentered(hdc, &cellRect, timetable[today][i].location, 35);
+                        SetTextColor(hdc, RGB(255,255,255)); // 恢复白色
+                    }
                 }
             }
         }
@@ -148,25 +253,20 @@ void DrawTimetable(HDC hdc, RECT rc, int viewMode) {
         int cellH = (rc.bottom - rc.top) / CLASSES;
         int cellW = (rc.right - rc.left) / DAYS;
 
-        // 横线
-        for (int i=0; i<=CLASSES; i++) {
-            MoveToEx(hdc, rc.left, rc.top+i*cellH, NULL);
-            LineTo(hdc, rc.right, rc.top+i*cellH);
-        }
-        // 竖线
-        for (int d=0; d<=DAYS; d++) {
-            MoveToEx(hdc, rc.left+d*cellW, rc.top, NULL);
-            LineTo(hdc, rc.left+d*cellW, rc.bottom);
-        }
-
         for (int d=0; d<DAYS; d++) {
+            RECT columnRect = {rc.left + d*cellW, rc.top, rc.left + (d+1)*cellW, rc.bottom};
+            if (!DayHasAnyClass(d)) {
+                DrawHolidayText(hdc, &columnRect);
+                continue;
+            }
+
             for (int i=0; i<CLASSES; i++) {
-                RECT cellRect = {rc.left + d*cellW, rc.top + i*cellH, rc.left + (d+1)*cellW, rc.top + (i+1)*cellH};
-                
+                RECT cellRect = {columnRect.left, rc.top + i*cellH, columnRect.right, rc.top + (i+1)*cellH};
+
                 if (timetable[d][i].name) {
                     // 绘制课程名称（居中显示）
                     DrawTextCentered(hdc, &cellRect, timetable[d][i].name, 10);
-                    
+
                     // 绘制位置信息（居中显示）
                     if (timetable[d][i].location) {
                         SetTextColor(hdc, RGB(200, 200, 200)); // 稍微淡一点的颜色
@@ -192,25 +292,13 @@ void RenderLayered(HWND hwnd, int viewMode) {
     int height = rc.bottom - rc.top;
     if (width <= 0 || height <= 0) return;
 
+    if (!EnsureLayerSurface(width, height)) {
+        return;
+    }
+
     // 获取 DPI，并按 DPI 缩放圆角半径
     UINT dpi = GetWindowDpi(hwnd);
     int corner = max(4, MulDiv(CORNER_RADIUS, dpi, 96)); // 最小值保护
-
-    // 创建 32bpp DIB
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void *pvBits = NULL;
-    HBITMAP hBitmap = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
-    if (!hBitmap || !pvBits) {
-        if (hBitmap) DeleteObject(hBitmap);
-        return;
-    }
 
     // 背景颜色和 alpha（基准 alpha）
     BYTE bgR = 0, bgG = 0, bgB = 0;  // 改为黑色背景
@@ -218,7 +306,7 @@ void RenderLayered(HWND hwnd, int viewMode) {
 
     // 先把缓冲区设置为不透明的背景预乘色（用 baseAlpha），后续会根据圆角蒙版重新赋值
     UINT pixels = width * height;
-    BYTE *ptr = (BYTE*)pvBits;
+    BYTE *ptr = (BYTE*)g_layerSurface.bits;
     BYTE bgRp_base = (BYTE)((bgR * baseAlpha) / 255);
     BYTE bgGp_base = (BYTE)((bgG * baseAlpha) / 255);
     BYTE bgBp_base = (BYTE)((bgB * baseAlpha) / 255);
@@ -231,15 +319,14 @@ void RenderLayered(HWND hwnd, int viewMode) {
     }
 
     // 在 DIB 的 DC 上绘制文字（GDI 不会修改 alpha 字节）
-    HDC hdcScreen = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(hdcScreen);
-    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hBitmap);
+    RECT drawRect = {0, 0, width, height};
+    HBITMAP oldBmp = (HBITMAP)SelectObject(g_layerDC, g_layerSurface.bitmap);
 
-    DrawTimetable(memDC, rc, viewMode);
+    DrawTimetable(g_layerDC, drawRect, viewMode);
 
     // 遍历像素：为圆角计算平滑遮罩；背景像素按遮罩设为预乘色，文本像素保持不透明
     // 使用像素中心 (x+0.5, y+0.5) 计算距离平方并在平方域内线性插值（避免 sqrt）
-    ptr = (BYTE*)pvBits;
+    ptr = (BYTE*)g_layerSurface.bits;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             BYTE b = ptr[0], g = ptr[1], r = ptr[2];
@@ -307,11 +394,8 @@ void RenderLayered(HWND hwnd, int viewMode) {
     bf.SourceConstantAlpha = 255;
     bf.AlphaFormat = AC_SRC_ALPHA;
 
-    UpdateLayeredWindow(hwnd, NULL, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &bf, ULW_ALPHA);
+    UpdateLayeredWindow(hwnd, NULL, &ptDst, &sizeWnd, g_layerDC, &ptSrc, 0, &bf, ULW_ALPHA);
 
-    // 清理
-    SelectObject(memDC, oldBmp);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, hdcScreen);
-    DeleteObject(hBitmap);
+    // 恢复 DC 原有的位图
+    SelectObject(g_layerDC, oldBmp);
 }
