@@ -18,8 +18,4 @@ void DrawTextCentered(HDC hdc, RECT* rc, WCHAR* text, int yOffset);
 // 当前渲染是否存在需要滚动显示的文本
 BOOL RendererHasOverflowingText(void);
 
-// 控制背景模糊开关
-void RendererSetBlurEnabled(BOOL enabled);
-BOOL RendererIsBlurEnabled(void);
-
 #endif // RENDERER_H
