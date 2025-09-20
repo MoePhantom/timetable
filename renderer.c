@@ -24,6 +24,7 @@ typedef HRESULT (WINAPI *PFNDwmFlush)(VOID);
 static PFNDwmFlush g_pfnDwmFlush = NULL;
 static BOOL g_dwmTriedLoad = FALSE;
 
+
 static void UpdateOverflowFlag(BOOL overflowed) {
     if (overflowed) {
         g_currentFrameHasOverflow = TRUE;
